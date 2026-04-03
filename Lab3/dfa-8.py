@@ -1,0 +1,432 @@
+#!/usr/bin/env python3
+"""
+dfa_8.py — AES-128 Differential Fault Analysis (DFA) — Offline Phase
+CS6630 Assignment 3
+
+Fault Model  : Single-Byte Fault
+Cipher       : AES-128 ECB encryption
+Fault Round  : Round 8 (before MixColumns of round 8)
+Key Recovered: K10 directly via DFA; K0 via reverse key schedule.
+"""
+
+import time
+from Crypto.Cipher import AES as _AES
+from enum import Enum
+
+# ─── Constants ─────────────────────────────────────────────────────────────────
+
+blocksize = 16
+
+FaultStatus = Enum('FaultStatus', 'Crash Loop NoFault MinorFault MajorFault WrongFault GoodEncFault GoodDecFault')
+
+_AesFaultMaps = [
+    None,  # decryption (unused)
+    # AES encryption — 4 diagonal patterns (group 0..3)
+    [[True,  False, False, False, False, False, False, True,  False, False, True,  False, False, True,  False, False],
+     [False, True,  False, False, True,  False, False, False, False, False, False, True,  False, False, True,  False],
+     [False, False, True,  False, False, True,  False, False, True,  False, False, False, False, False, False, True ],
+     [False, False, False, True,  False, False, True,  False, False, True,  False, False, True,  False, False, False]]
+]
+
+_AesInvSBox = [
+    0x52, 0x09, 0x6A, 0xD5, 0x30, 0x36, 0xA5, 0x38, 0xBF, 0x40, 0xA3, 0x9E, 0x81, 0xF3, 0xD7, 0xFB,
+    0x7C, 0xE3, 0x39, 0x82, 0x9B, 0x2F, 0xFF, 0x87, 0x34, 0x8E, 0x43, 0x44, 0xC4, 0xDE, 0xE9, 0xCB,
+    0x54, 0x7B, 0x94, 0x32, 0xA6, 0xC2, 0x23, 0x3D, 0xEE, 0x4C, 0x95, 0x0B, 0x42, 0xFA, 0xC3, 0x4E,
+    0x08, 0x2E, 0xA1, 0x66, 0x28, 0xD9, 0x24, 0xB2, 0x76, 0x5B, 0xA2, 0x49, 0x6D, 0x8B, 0xD1, 0x25,
+    0x72, 0xF8, 0xF6, 0x64, 0x86, 0x68, 0x98, 0x16, 0xD4, 0xA4, 0x5C, 0xCC, 0x5D, 0x65, 0xB6, 0x92,
+    0x6C, 0x70, 0x48, 0x50, 0xFD, 0xED, 0xB9, 0xDA, 0x5E, 0x15, 0x46, 0x57, 0xA7, 0x8D, 0x9D, 0x84,
+    0x90, 0xD8, 0xAB, 0x00, 0x8C, 0xBC, 0xD3, 0x0A, 0xF7, 0xE4, 0x58, 0x05, 0xB8, 0xB3, 0x45, 0x06,
+    0xD0, 0x2C, 0x1E, 0x8F, 0xCA, 0x3F, 0x0F, 0x02, 0xC1, 0xAF, 0xBD, 0x03, 0x01, 0x13, 0x8A, 0x6B,
+    0x3A, 0x91, 0x11, 0x41, 0x4F, 0x67, 0xDC, 0xEA, 0x97, 0xF2, 0xCF, 0xCE, 0xF0, 0xB4, 0xE6, 0x73,
+    0x96, 0xAC, 0x74, 0x22, 0xE7, 0xAD, 0x35, 0x85, 0xE2, 0xF9, 0x37, 0xE8, 0x1C, 0x75, 0xDF, 0x6E,
+    0x47, 0xF1, 0x1A, 0x71, 0x1D, 0x29, 0xC5, 0x89, 0x6F, 0xB7, 0x62, 0x0E, 0xAA, 0x18, 0xBE, 0x1B,
+    0xFC, 0x56, 0x3E, 0x4B, 0xC6, 0xD2, 0x79, 0x20, 0x9A, 0xDB, 0xC0, 0xFE, 0x78, 0xCD, 0x5A, 0xF4,
+    0x1F, 0xDD, 0xA8, 0x33, 0x88, 0x07, 0xC7, 0x31, 0xB1, 0x12, 0x10, 0x59, 0x27, 0x80, 0xEC, 0x5F,
+    0x60, 0x51, 0x7F, 0xA9, 0x19, 0xB5, 0x4A, 0x0D, 0x2D, 0xE5, 0x7A, 0x9F, 0x93, 0xC9, 0x9C, 0xEF,
+    0xA0, 0xE0, 0x3B, 0x4D, 0xAE, 0x2A, 0xF5, 0xB0, 0xC8, 0xEB, 0xBB, 0x3C, 0x83, 0x53, 0x99, 0x61,
+    0x17, 0x2B, 0x04, 0x7E, 0xBA, 0x77, 0xD6, 0x26, 0xE1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0C, 0x7D,
+]
+
+_AesSBox = [
+    0x63, 0x7C, 0x77, 0x7B, 0xF2, 0x6B, 0x6F, 0xC5, 0x30, 0x01, 0x67, 0x2B, 0xFE, 0xD7, 0xAB, 0x76,
+    0xCA, 0x82, 0xC9, 0x7D, 0xFA, 0x59, 0x47, 0xF0, 0xAD, 0xD4, 0xA2, 0xAF, 0x9C, 0xA4, 0x72, 0xC0,
+    0xB7, 0xFD, 0x93, 0x26, 0x36, 0x3F, 0xF7, 0xCC, 0x34, 0xA5, 0xE5, 0xF1, 0x71, 0xD8, 0x31, 0x15,
+    0x04, 0xC7, 0x23, 0xC3, 0x18, 0x96, 0x05, 0x9A, 0x07, 0x12, 0x80, 0xE2, 0xEB, 0x27, 0xB2, 0x75,
+    0x09, 0x83, 0x2C, 0x1A, 0x1B, 0x6E, 0x5A, 0xA0, 0x52, 0x3B, 0xD6, 0xB3, 0x29, 0xE3, 0x2F, 0x84,
+    0x53, 0xD1, 0x00, 0xED, 0x20, 0xFC, 0xB1, 0x5B, 0x6A, 0xCB, 0xBE, 0x39, 0x4A, 0x4C, 0x58, 0xCF,
+    0xD0, 0xEF, 0xAA, 0xFB, 0x43, 0x4D, 0x33, 0x85, 0x45, 0xF9, 0x02, 0x7F, 0x50, 0x3C, 0x9F, 0xA8,
+    0x51, 0xA3, 0x40, 0x8F, 0x92, 0x9D, 0x38, 0xF5, 0xBC, 0xB6, 0xDA, 0x21, 0x10, 0xFF, 0xF3, 0xD2,
+    0xCD, 0x0C, 0x13, 0xEC, 0x5F, 0x97, 0x44, 0x17, 0xC4, 0xA7, 0x7E, 0x3D, 0x64, 0x5D, 0x19, 0x73,
+    0x60, 0x81, 0x4F, 0xDC, 0x22, 0x2A, 0x90, 0x88, 0x46, 0xEE, 0xB8, 0x14, 0xDE, 0x5E, 0x0B, 0xDB,
+    0xE0, 0x32, 0x3A, 0x0A, 0x49, 0x06, 0x24, 0x5C, 0xC2, 0xD3, 0xAC, 0x62, 0x91, 0x95, 0xE4, 0x79,
+    0xE7, 0xC8, 0x37, 0x6D, 0x8D, 0xD5, 0x4E, 0xA9, 0x6C, 0x56, 0xF4, 0xEA, 0x65, 0x7A, 0xAE, 0x08,
+    0xBA, 0x78, 0x25, 0x2E, 0x1C, 0xA6, 0xB4, 0xC6, 0xE8, 0xDD, 0x74, 0x1F, 0x4B, 0xBD, 0x8B, 0x8A,
+    0x70, 0x3E, 0xB5, 0x66, 0x48, 0x03, 0xF6, 0x0E, 0x61, 0x35, 0x57, 0xB9, 0x86, 0xC1, 0x1D, 0x9E,
+    0xE1, 0xF8, 0x98, 0x11, 0x69, 0xD9, 0x8E, 0x94, 0x9B, 0x1E, 0x87, 0xE9, 0xCE, 0x55, 0x28, 0xDF,
+    0x8C, 0xA1, 0x89, 0x0D, 0xBF, 0xE6, 0x42, 0x68, 0x41, 0x99, 0x2D, 0x0F, 0xB0, 0x54, 0xBB, 0x16,
+]
+
+# GF(2^8) multiplication lookup tables for coefficients used in MixColumns
+_AesMult = [
+    None,
+    # ×1
+    list(range(256)),
+    # ×2
+    [0x00,0x02,0x04,0x06,0x08,0x0a,0x0c,0x0e,0x10,0x12,0x14,0x16,0x18,0x1a,0x1c,0x1e,
+     0x20,0x22,0x24,0x26,0x28,0x2a,0x2c,0x2e,0x30,0x32,0x34,0x36,0x38,0x3a,0x3c,0x3e,
+     0x40,0x42,0x44,0x46,0x48,0x4a,0x4c,0x4e,0x50,0x52,0x54,0x56,0x58,0x5a,0x5c,0x5e,
+     0x60,0x62,0x64,0x66,0x68,0x6a,0x6c,0x6e,0x70,0x72,0x74,0x76,0x78,0x7a,0x7c,0x7e,
+     0x80,0x82,0x84,0x86,0x88,0x8a,0x8c,0x8e,0x90,0x92,0x94,0x96,0x98,0x9a,0x9c,0x9e,
+     0xa0,0xa2,0xa4,0xa6,0xa8,0xaa,0xac,0xae,0xb0,0xb2,0xb4,0xb6,0xb8,0xba,0xbc,0xbe,
+     0xc0,0xc2,0xc4,0xc6,0xc8,0xca,0xcc,0xce,0xd0,0xd2,0xd4,0xd6,0xd8,0xda,0xdc,0xde,
+     0xe0,0xe2,0xe4,0xe6,0xe8,0xea,0xec,0xee,0xf0,0xf2,0xf4,0xf6,0xf8,0xfa,0xfc,0xfe,
+     0x1b,0x19,0x1f,0x1d,0x13,0x11,0x17,0x15,0x0b,0x09,0x0f,0x0d,0x03,0x01,0x07,0x05,
+     0x3b,0x39,0x3f,0x3d,0x33,0x31,0x37,0x35,0x2b,0x29,0x2f,0x2d,0x23,0x21,0x27,0x25,
+     0x5b,0x59,0x5f,0x5d,0x53,0x51,0x57,0x55,0x4b,0x49,0x4f,0x4d,0x43,0x41,0x47,0x45,
+     0x7b,0x79,0x7f,0x7d,0x73,0x71,0x77,0x75,0x6b,0x69,0x6f,0x6d,0x63,0x61,0x67,0x65,
+     0x9b,0x99,0x9f,0x9d,0x93,0x91,0x97,0x95,0x8b,0x89,0x8f,0x8d,0x83,0x81,0x87,0x85,
+     0xbb,0xb9,0xbf,0xbd,0xb3,0xb1,0xb7,0xb5,0xab,0xa9,0xaf,0xad,0xa3,0xa1,0xa7,0xa5,
+     0xdb,0xd9,0xdf,0xdd,0xd3,0xd1,0xd7,0xd5,0xcb,0xc9,0xcf,0xcd,0xc3,0xc1,0xc7,0xc5,
+     0xfb,0xf9,0xff,0xfd,0xf3,0xf1,0xf7,0xf5,0xeb,0xe9,0xef,0xed,0xe3,0xe1,0xe7,0xe5],
+    # ×3
+    [0x00,0x03,0x06,0x05,0x0c,0x0f,0x0a,0x09,0x18,0x1b,0x1e,0x1d,0x14,0x17,0x12,0x11,
+     0x30,0x33,0x36,0x35,0x3c,0x3f,0x3a,0x39,0x28,0x2b,0x2e,0x2d,0x24,0x27,0x22,0x21,
+     0x60,0x63,0x66,0x65,0x6c,0x6f,0x6a,0x69,0x78,0x7b,0x7e,0x7d,0x74,0x77,0x72,0x71,
+     0x50,0x53,0x56,0x55,0x5c,0x5f,0x5a,0x59,0x48,0x4b,0x4e,0x4d,0x44,0x47,0x42,0x41,
+     0xc0,0xc3,0xc6,0xc5,0xcc,0xcf,0xca,0xc9,0xd8,0xdb,0xde,0xdd,0xd4,0xd7,0xd2,0xd1,
+     0xf0,0xf3,0xf6,0xf5,0xfc,0xff,0xfa,0xf9,0xe8,0xeb,0xee,0xed,0xe4,0xe7,0xe2,0xe1,
+     0xa0,0xa3,0xa6,0xa5,0xac,0xaf,0xaa,0xa9,0xb8,0xbb,0xbe,0xbd,0xb4,0xb7,0xb2,0xb1,
+     0x90,0x93,0x96,0x95,0x9c,0x9f,0x9a,0x99,0x88,0x8b,0x8e,0x8d,0x84,0x87,0x82,0x81,
+     0x9b,0x98,0x9d,0x9e,0x97,0x94,0x91,0x92,0x83,0x80,0x85,0x86,0x8f,0x8c,0x89,0x8a,
+     0xab,0xa8,0xad,0xae,0xa7,0xa4,0xa1,0xa2,0xb3,0xb0,0xb5,0xb6,0xbf,0xbc,0xb9,0xba,
+     0xfb,0xf8,0xfd,0xfe,0xf7,0xf4,0xf1,0xf2,0xe3,0xe0,0xe5,0xe6,0xef,0xec,0xe9,0xea,
+     0xcb,0xc8,0xcd,0xce,0xc7,0xc4,0xc1,0xc2,0xd3,0xd0,0xd5,0xd6,0xdf,0xdc,0xd9,0xda,
+     0x5b,0x58,0x5d,0x5e,0x57,0x54,0x51,0x52,0x43,0x40,0x45,0x46,0x4f,0x4c,0x49,0x4a,
+     0x6b,0x68,0x6d,0x6e,0x67,0x64,0x61,0x62,0x73,0x70,0x75,0x76,0x7f,0x7c,0x79,0x7a,
+     0x3b,0x38,0x3d,0x3e,0x37,0x34,0x31,0x32,0x23,0x20,0x25,0x26,0x2f,0x2c,0x29,0x2a,
+     0x0b,0x08,0x0d,0x0e,0x07,0x04,0x01,0x02,0x13,0x10,0x15,0x16,0x1f,0x1c,0x19,0x1a],
+]
+
+RCON = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36]
+
+# ─── AES Helpers ───────────────────────────────────────────────────────────────
+
+def xor(b1, b2):
+    return bytearray(a ^ b for a, b in zip(b1, b2))
+
+def check(output, verbose=1, init=False, _intern={}):
+    """
+    Compare output against stored reference.
+    Returns (FaultStatus, group_index) where group_index is 0-3 for a good
+    4-byte diagonal fault, or None otherwise.
+    """
+    if init:
+        _intern.clear()
+    if not _intern:
+        _intern['ref'] = output
+        return (FaultStatus.NoFault, None)
+    if output == _intern['ref']:
+        return (FaultStatus.NoFault, None)
+    diff     = xor(output, _intern['ref'])
+    diffmap  = [x != 0 for x in diff]
+    diffsum  = sum(diffmap)
+    if diffsum == 4:
+        faultmaps = _AesFaultMaps[True]   # encryption only
+        if diffmap in faultmaps:
+            return (FaultStatus.GoodEncFault, faultmaps.index(diffmap))
+        return (FaultStatus.WrongFault, None)
+    elif diffsum < 4:
+        return (FaultStatus.MinorFault, None)
+    else:
+        return (FaultStatus.MajorFault, None)
+
+# ─── Key Schedule ───────────────────────────────────────────────────────────────
+
+def key_schedule(key: bytes):
+    """Expand 16-byte AES-128 key into 11 round keys."""
+    words = [list(key[i*4:(i+1)*4]) for i in range(4)]
+    for i in range(4, 44):
+        temp = words[i-1][:]
+        if i % 4 == 0:
+            temp = temp[1:] + temp[:1]
+            temp = [_AesSBox[b] for b in temp]
+            temp[0] ^= RCON[i // 4 - 1]
+        words.append([words[i-4][j] ^ temp[j] for j in range(4)])
+    return [bytes(sum([words[r*4+c] for c in range(4)], [])) for r in range(11)]
+
+def reverse_key_schedule(k10: bytes) -> bytes:
+    """Invert the AES-128 key schedule to recover K0 from K10."""
+    all_words = [None] * 44
+    for i in range(4):
+        all_words[40 + i] = list(k10[i*4:(i+1)*4])
+    for i in range(39, -1, -1):
+        if (i + 4) % 4 == 0:
+            temp = all_words[i + 3][:]
+            temp = temp[1:] + temp[:1]
+            temp = [_AesSBox[b] for b in temp]
+            temp[0] ^= RCON[(i + 4) // 4 - 1]
+            all_words[i] = [all_words[i+4][j] ^ temp[j] for j in range(4)]
+        else:
+            all_words[i] = [all_words[i+4][j] ^ all_words[i+3][j] for j in range(4)]
+    return bytes(b for w in all_words[:4] for b in w)
+
+# ─── DFA Core ──────────────────────────────────────────────────────────────────
+
+def _get_compat(diff, tmult):
+    """
+    For a given output difference `diff` and MixColumns coefficient `tmult`,
+    return for each possible key byte k: the value z such that
+        InvSBox[k ^ diff] ^ InvSBox[k] == mult(tmult, z)
+    i.e., which fault value z is compatible with this key candidate.
+    """
+    itab = [0] * 256
+    for i, mi in enumerate(_AesMult[tmult]):
+        itab[mi] = i
+    # For AES encryption, the SBox used in the last round is the forward SBox,
+    # so we use InvSBox here to invert back through it.
+    return [itab[_AesInvSBox[j ^ diff] ^ _AesInvSBox[j]] for j in range(256)]
+
+def _get_cands(Diff, tmult):
+    """
+    Given the 4 output differences (Diff) for a diagonal group and a
+    MixColumns row pattern (tmult = [c0,c1,c2,c3]), find all fault values z
+    that are simultaneously compatible with all 4 differences, and for each
+    such z return the set of key byte candidates per position.
+    """
+    candi = [_get_compat(di, ti) for di, ti in zip(Diff, tmult)]
+    # z values compatible with ALL 4 positions simultaneously
+    z = set(candi[0]).intersection(*candi[1:])
+    candi = [[t for t in enumerate(ci) if t[1] in z] for ci in candi]
+    cands = [[set([j for j, x in ci if x == zi]) for ci in candi] for zi in z]
+    return cands
+
+def _absorb(index, o, candidates, ref):
+    """
+    Process one faulty output for diagonal group `index`.
+    Tries all 4 MixColumns row hypotheses (fault in row 0,1,2,3),
+    collects candidate K10 byte sets, then intersects with existing candidates.
+    """
+    faultmap = _AesFaultMaps[True][index]
+    Diff = [x ^ g for x, g, y in zip(o, ref, faultmap) if y]
+
+    # 4 row hypotheses: MixColumns pattern [2,3,1,1] and its rotations
+    Cands  = _get_cands(Diff, [2, 3, 1, 1])
+    Cands += _get_cands(Diff, [3, 1, 1, 2])
+    Cands += _get_cands(Diff, [1, 1, 2, 3])
+    Cands += _get_cands(Diff, [1, 2, 3, 1])
+
+    if not candidates[index]:
+        candidates[index] = Cands
+    else:
+        merged = []
+        for lc0, lc1, lc2, lc3 in Cands:
+            for oc0, oc1, oc2, oc3 in candidates[index]:
+                i0, i1, i2, i3 = lc0 & oc0, lc1 & oc1, lc2 & oc2, lc3 & oc3
+                if i0 and i1 and i2 and i3:
+                    merged.append((i0, i1, i2, i3))
+        if merged:
+            candidates[index] = merged
+        else:
+            candidates[index] += Cands
+
+def crack_bytes(r9faults, ref, verbose=1):
+    """
+    Recover K10 from a list of round-9-equivalent faulty ciphertexts.
+    Each fault must produce exactly 4 differing bytes in a diagonal pattern.
+
+    Returns (K10 hex string, byte_recovery_map).
+    byte_recovery_map: dict  K10_byte_index (0-15) -> minimum number of
+    original fault pairs needed to uniquely determine that byte.
+    (r9 fault index // 4) + 1 converts to original pair count since each
+    original pair generates 4 r9 faults.)
+    """
+    candidates       = [[], [], [], []]
+    recovered        = [False, False, False, False]
+    key              = [None] * 16
+    # r9 fault index at which each K10 byte was first uniquely resolved
+    byte_resolved_at = {}   # k10_byte_index -> r9_fault_index (0-based)
+
+    check(ref, init=True)
+
+    for fault_idx, o in enumerate(r9faults):
+        _, index = check(o, verbose=verbose)
+        if index is None:
+            continue
+        if recovered[index]:
+            continue
+
+        _absorb(index, o, candidates, ref)
+        c = candidates
+
+        # Check if this group is fully resolved (1 candidate per byte)
+        if (len(c[index]) == 1 and
+            all(len(c[index][0][j]) == 1 for j in range(4))):
+
+            recovered[index] = True
+            faultmap = _AesFaultMaps[True][index]
+            Keys = [k for k, y in zip(range(16), faultmap) if y]
+            Gold = [g for g, y in zip(ref,        faultmap) if y]
+            for j in range(4):
+                k10_pos = Keys[j]
+                key[k10_pos] = list(c[index][0][j])[0] ^ Gold[j]
+                if k10_pos not in byte_resolved_at:
+                    byte_resolved_at[k10_pos] = fault_idx  # r9 index
+
+            if verbose > 1:
+                print("Round key bytes recovered:")
+                print(''.join(["%02X" % x if x is not None else ".." for x in key]))
+
+        if False in recovered:
+            continue
+
+        # All 4 groups solved
+        roundkey = ''.join(["%02X" % x for x in key])
+        # print("Last round key #10 found:")
+        # print(roundkey)
+        return roundkey, byte_resolved_at
+
+    if True in recovered:
+        return ''.join(["%02X" % x if x is not None else ".." for x in key]), byte_resolved_at
+    return None, {}
+
+def convert_r8faults_bytes(r8faults, ref):
+    """
+    Convert round-8 faults (16 differing CT bytes) into round-9 equivalent
+    faults (4 differing bytes) by isolating each diagonal group.
+    Each input pair produces 4 output pairs, one per diagonal.
+    """
+    r9faults = []
+    for f8 in r8faults:
+        # Diagonal 0: positions [0, 7, 10, 13]
+        r9faults.append(bytearray(ref[0:0] +f8[0:1] +ref[1:7]  +f8[7:8]  +ref[8:10] +f8[10:11]+ref[11:13]+f8[13:14]+ref[14:16]))
+        # Diagonal 1: positions [1, 4, 11, 14]
+        r9faults.append(bytearray(ref[0:1] +f8[1:2] +ref[2:4]  +f8[4:5]  +ref[5:11] +f8[11:12]+ref[12:14]+f8[14:15]+ref[15:16]))
+        # Diagonal 2: positions [2, 5, 8, 15]
+        r9faults.append(bytearray(ref[0:2] +f8[2:3] +ref[3:5]  +f8[5:6]  +ref[6:8]  +f8[8:9]  +ref[9:15] +f8[15:16]+ref[16:16]))
+        # Diagonal 3: positions [3, 6, 9, 12]
+        r9faults.append(bytearray(ref[0:3] +f8[3:4] +ref[4:6]  +f8[6:7]  +ref[7:9]  +f8[9:10] +ref[10:12]+f8[12:13]+ref[13:16]))
+    return r9faults
+
+# ─── Key Schedule ───────────────────────────────────────────────────────────────
+
+def detect_fault_round(correct_ct, faulty_ct):
+    n = sum(1 for a, b in zip(correct_ct, faulty_ct) if a != b)
+    if n == 4:  return 9
+    if n == 16: return 8
+    return -1
+
+def dfa_recover_k10(correct_ct, faulty_cts):
+    r8faults = [bytearray(f) for f in faulty_cts]
+    ref      = bytearray(correct_ct)
+    r9faults = convert_r8faults_bytes(r8faults, ref)
+    k10_hex, byte_resolved_at = crack_bytes(r9faults, ref, verbose=0)
+    if k10_hex is None:
+        raise RuntimeError("DFA failed: could not recover K10.")
+    # Convert r9 fault index -> minimum original pair count
+    # Each original pair produces 4 r9 faults (one per diagonal),
+    # so original_pair = (r9_index // 4) + 1
+    min_pairs_per_byte = {
+        byte_idx: (r9_idx // 4) + 1
+        for byte_idx, r9_idx in byte_resolved_at.items()
+    }
+    return bytes.fromhex(k10_hex), min_pairs_per_byte
+
+# ─── Main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    plaintext  = bytes([67,101,114,116,105,102,105,99,97,116,101,115,32,98,105,110])
+    correct_ct = bytes([217,74,16,228,27,57,159,23,43,14,228,177,45,103,184,36])
+    faulty_cts = [
+        bytes([205,215,232,8,47,128,87,206,42,174,124,26,184,200,110,227]),
+        bytes([245,104,167,254,194,45,50,62,45,226,68,238,48,47,71,250]),
+        bytes([211,233,249,146,139,39,118,108,255,241,25,101,116,28,121,231]),
+        bytes([38,216,232,49,242,64,194,11,35,187,151,194,143,125,177,214]),
+        bytes([162,204,26,172,41,188,79,228,151,180,143,228,143,107,250,126]),
+        bytes([242,159,215,236,224,55,225,15,44,15,164,231,154,242,96,28]),
+        bytes([213,117,53,205,71,201,153,116,66,80,42,214,78,217,238,127]),
+        bytes([12,213,228,115,12,228,189,44,156,3,209,235,31,22,23,182]),
+        bytes([4,216,28,107,49,152,207,80,8,87,14,38,105,164,30,209]),
+        bytes([53,164,116,139,226,233,192,38,125,6,220,178,139,96,19,0]),
+    ]
+    
+
+    print("=" * 64)
+    print("AES-128 Differential Fault Analysis (DFA) — Offline Phase")
+    print("=" * 64)
+
+    # 1: Fault round detection
+    print("\n[1] Fault Round Detection")
+    detected_round = detect_fault_round(correct_ct, faulty_cts[0])
+    # for i, fct in enumerate(faulty_cts):
+    #     nonzero = [j for j in range(16) if correct_ct[j] ^ fct[j] != 0]
+    #     print(f"  Pair {i:2d}: {len(nonzero):2d} differing bytes - {nonzero}")
+    print(f"\n  - Fault injected at Round {detected_round}")
+
+    # 2: Recover K10
+    print("\n[2] Recovering K10 via DFA")
+    t0  = time.time()
+    k10, min_pairs_per_byte = dfa_recover_k10(correct_ct, faulty_cts)
+    dt  = time.time() - t0
+    print(f"  K10 (hex)  : {k10.hex().upper()}")
+    print(f"  K10 (bytes): {list(k10)}")
+    print(f"  Time       : {dt:.4f} s")
+
+    # 3: Reverse key schedule - K0
+    print("\n[3] Reversing key schedule to get K0")
+    k0 = reverse_key_schedule(k10)
+    print(f"  K0 (hex)   : {k0.hex().upper()}")
+    print(f"  K0 (bytes) : {list(k0)}")
+
+    # 4: Verify
+    print("\n[4] Verification")
+    ct_check = _AES.new(k0, _AES.MODE_ECB).encrypt(plaintext)
+    verified = ct_check == correct_ct
+    print(f"  AES(plaintext, K0) == correct_ct : {'PASS' if verified else 'FAIL'}")
+
+    # 5: All round keys
+    all_rks = key_schedule(k0)
+    print("\n[5] All Round Keys")
+    # for r, rk in enumerate(all_rks):
+    #     tag = " ← original key" if r == 0 else (" ← recovered by DFA" if r == 10 else "")
+    #     print(f"  round {r:2d} : {list(rk)}{tag}")
+
+    # Write output file
+    with open("roundkeys.txt", "w") as f:
+        for r, rk in enumerate(all_rks):
+            f.write(f"round {r} : {list(rk)}\n")
+
+    print("\n  Results written to roundkeys.txt")
+
+    # 6: Minimum fault pairs needed per K10 byte
+    print("\n[6] Minimum fault pairs to recover each K10 byte")
+    print(f"  {'Byte':>4}  {'K10 value':>10}  {'Min pairs':>9}  Diagonal group")
+    print(f"  {'-'*4}  {'-'*10}  {'-'*9}  {'-'*14}")
+    # Map each K10 byte to its diagonal group
+    byte_to_group = {}
+    for grp, faultmap in enumerate(_AesFaultMaps[True]):
+        for pos, active in enumerate(faultmap):
+            if active:
+                byte_to_group[pos] = grp
+    for i in range(16):
+        val      = k10[i]
+        pairs    = min_pairs_per_byte.get(i, '?')
+        grp      = byte_to_group.get(i, '?')
+        print(f"  {i:>4}  {val:#04x} ({val:>3d})  {str(pairs):>9}  {grp}")
+    max_pairs = max(min_pairs_per_byte.values()) if min_pairs_per_byte else '?'
+    print(f"\n  - Minimum fault pairs for full K10 recovery: {max_pairs}")
+    print()
+    print()
+    print("=" * 64)
+    print("SUMMARY")
+    print("=" * 64)
+    print(f"  Fault round              : Round {detected_round}")
+    print(f"  Round key recovered (DFA): K10")
+    print(f"  Bytes recovered (K10)    : 16 / 16")
+    print(f"  K10                      : {k10.hex().upper()}")
+    print(f"  K0 (original secret key) : {k0.hex().upper()}")
+    print(f"  Verification             : {'PASS' if verified else 'FAIL'}")
+    print(f"  DFA analysis time        : {dt:.4f} s")
+    print("=" * 64)
+
+if __name__ == "__main__":
+    main()
