@@ -1,0 +1,8 @@
+# Faulty Ciphertext 5
+# Format: hex bytes (space separated)
+# A fault was injected somewhere during AES-128 encryption
+
+A2 CC 1A AC 29 BC 4F E4 97 B4 8F E4 8F 6B FA 7E
+
+# As decimal list:
+[162, 204, 26, 172, 41, 188, 79, 228, 151, 180, 143, 228, 143, 107, 250, 126]

@@ -1,0 +1,8 @@
+# Faulty Ciphertext 10
+# Format: hex bytes (space separated)
+# A fault was injected somewhere during AES-128 encryption
+
+35 A4 74 8B E2 E9 C0 26 7D 06 DC B2 8B 60 13 00
+
+# As decimal list:
+[53, 164, 116, 139, 226, 233, 192, 38, 125, 6, 220, 178, 139, 96, 19, 0]

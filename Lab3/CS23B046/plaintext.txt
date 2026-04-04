@@ -1,0 +1,7 @@
+# Plaintext
+# This is the plaintext that was encrypted to produce correct_ct.txt
+# Use this to verify your recovered key: AES(plaintext, K0) == correct_ct
+
+# ASCII : Certificates bin
+# Hex   : 43 65 72 74 69 66 69 63 61 74 65 73 20 62 69 6E
+[67, 101, 114, 116, 105, 102, 105, 99, 97, 116, 101, 115, 32, 98, 105, 110]

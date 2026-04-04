@@ -1,0 +1,8 @@
+# Correct Ciphertext
+# Format: hex bytes (space separated)
+# AES-128 encryption of plaintext.txt with the secret key
+
+D9 4A 10 E4 1B 39 9F 17 2B 0E E4 B1 2D 67 B8 24
+
+# As decimal list:
+[217, 74, 16, 228, 27, 57, 159, 23, 43, 14, 228, 177, 45, 103, 184, 36]
